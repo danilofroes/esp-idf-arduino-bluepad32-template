@@ -24,7 +24,7 @@
 // DO NOT INCLUDE.
 // CAN ONLY BE INCLUDED FROM uni_controller_type.c
 
-#define MAKE_CONTROLLER_ID(nVID, nPID) (uint32_t)((uint16_t)nVID << 16 | (uint16_t)nPID)
+#define MAKE_CONTROLLER_ID(nVID, nPID) ((uint32_t)nVID << 16 | (uint16_t)nPID)
 
 // clang-format off
 
@@ -451,7 +451,9 @@ static const uni_controller_description_t arrControllers[] = {
 	{ MAKE_CONTROLLER_ID( 0x146b, 0x0611 ), k_eControllerType_XBoxOneController, NULL },	// Xbox Controller Mode for NACON Revolution 3
 
 	// These have been added via Minidump for unrecognized Xinput controller assert
+#if !UNI_HID_DEVICE_ALLOW_NO_DIS
 	{ MAKE_CONTROLLER_ID( 0x0000, 0x0000 ), k_eControllerType_XBox360Controller, NULL },	// Unknown Controller
+#endif
 	{ MAKE_CONTROLLER_ID( 0x045e, 0x02a2 ), k_eControllerType_XBox360Controller, NULL },	// Unknown Controller - Microsoft VID
 	{ MAKE_CONTROLLER_ID( 0x0e6f, 0x1414 ), k_eControllerType_XBox360Controller, NULL },	// Unknown Controller
 	{ MAKE_CONTROLLER_ID( 0x0e6f, 0x0159 ), k_eControllerType_XBox360Controller, NULL },	// Unknown Controller

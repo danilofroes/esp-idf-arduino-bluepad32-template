@@ -10,6 +10,8 @@
 
 #include "parser/uni_hid_parser_steam.h"
 
+#include <stdint.h>
+
 #include "controller/uni_controller.h"
 #include "hid_usage.h"
 #include "uni_common.h"
@@ -90,20 +92,28 @@ static uint8_t cmd_disable_lizard[] = {
 };
 // clang-format on
 
-static gatt_client_service_t le_steam_service;
-static gatt_client_characteristic_t le_steam_characteristic_report;
-static hci_con_handle_t connection_handle;
-static uni_hid_device_t* device;
-static steam_query_state_t query_state;
+typedef struct {
+    gatt_client_service_t service;
+    gatt_client_characteristic_t characteristic_report;
+    steam_query_state_t query_state;
+} steam_instance_t;
+_Static_assert(sizeof(steam_instance_t) < HID_DEVICE_MAX_PARSER_DATA, "Steam instance too big");
 
 static void parse_buttons(struct uni_hid_device_s* d, const uint8_t* data);
 static void parse_triggers(struct uni_hid_device_s* d, const uint8_t* data);
 static void parse_thumbstick(struct uni_hid_device_s* d, const uint8_t* data);
 static void parse_right_pad(struct uni_hid_device_s* d, const uint8_t* data);
 
+static steam_instance_t* get_steam_instance(uni_hid_device_t* d) {
+    return (steam_instance_t*)&d->parser_data[0];
+}
+
 // TODO: Make it easier for "parsers" to write/read/get notified from characteristics
 static void uni_steam_handle_gatt_client_event(uint8_t packet_type, uint16_t channel, uint8_t* packet, uint16_t size) {
     uint8_t att_status;
+    uni_hid_device_t* device;
+    steam_instance_t* ins;
+    hci_con_handle_t con_handle;
 
     ARG_UNUSED(channel);
     ARG_UNUSED(size);
@@ -112,12 +122,34 @@ static void uni_steam_handle_gatt_client_event(uint8_t packet_type, uint16_t cha
         return;
 
     uint8_t event = hci_event_packet_get_type(packet);
-    switch (query_state) {
+    switch (event) {
+        case GATT_EVENT_SERVICE_QUERY_RESULT:
+            con_handle = gatt_event_service_query_result_get_handle(packet);
+            break;
+        case GATT_EVENT_CHARACTERISTIC_QUERY_RESULT:
+            con_handle = gatt_event_characteristic_query_result_get_handle(packet);
+            break;
+        case GATT_EVENT_QUERY_COMPLETE:
+            con_handle = gatt_event_query_complete_get_handle(packet);
+            break;
+        default:
+            loge("Steam: Unknown GATT event: %#x\n", event);
+            return;
+    }
+
+    device = uni_hid_device_get_instance_for_connection_handle(con_handle);
+    if (!device) {
+        loge("Steam: Invalid device for connection handle: %#x\n", con_handle);
+        return;
+    }
+    ins = get_steam_instance(device);
+
+    switch (ins->query_state) {
         case STATE_QUERY_SERVICE:
             switch (event) {
                 case GATT_EVENT_SERVICE_QUERY_RESULT:
                     // store service (we expect only one)
-                    gatt_event_service_query_result_get_service(packet, &le_steam_service);
+                    gatt_event_service_query_result_get_service(packet, &ins->service);
                     break;
                 case GATT_EVENT_QUERY_COMPLETE:
                     att_status = gatt_event_query_complete_get_att_status(packet);
@@ -128,9 +160,9 @@ static void uni_steam_handle_gatt_client_event(uint8_t packet_type, uint16_t cha
                         break;
                     }
                     // service query complete, look for characteristic report
-                    query_state = STATE_QUERY_CHARACTERISTIC_REPORT;
+                    ins->query_state = STATE_QUERY_CHARACTERISTIC_REPORT;
                     gatt_client_discover_characteristics_for_service_by_uuid128(uni_steam_handle_gatt_client_event,
-                                                                                connection_handle, &le_steam_service,
+                                                                                con_handle, &ins->service,
                                                                                 le_steam_characteristic_report_uuid);
                     break;
                 default:
@@ -147,13 +179,13 @@ static void uni_steam_handle_gatt_client_event(uint8_t packet_type, uint16_t cha
                         // gap_disconnect(connection_handle);
                         break;
                     }
-                    gatt_client_write_value_of_characteristic(uni_steam_handle_gatt_client_event, connection_handle,
-                                                              le_steam_characteristic_report.value_handle,
+                    gatt_client_write_value_of_characteristic(uni_steam_handle_gatt_client_event, con_handle,
+                                                              ins->characteristic_report.value_handle,
                                                               sizeof(cmd_clear_mappings), cmd_clear_mappings);
-                    query_state = STATE_QUERY_CLEAR_MAPPINGS;
+                    ins->query_state = STATE_QUERY_CLEAR_MAPPINGS;
                     break;
                 case GATT_EVENT_CHARACTERISTIC_QUERY_RESULT:
-                    gatt_event_characteristic_query_result_get_characteristic(packet, &le_steam_characteristic_report);
+                    gatt_event_characteristic_query_result_get_characteristic(packet, &ins->characteristic_report);
                     break;
                 default:
                     loge("Steam: Unknown event: %#x\n", event);
@@ -169,10 +201,10 @@ static void uni_steam_handle_gatt_client_event(uint8_t packet_type, uint16_t cha
                         // gap_disconnect(connection_handle);
                         break;
                     }
-                    gatt_client_write_value_of_characteristic(uni_steam_handle_gatt_client_event, connection_handle,
-                                                              le_steam_characteristic_report.value_handle,
+                    gatt_client_write_value_of_characteristic(uni_steam_handle_gatt_client_event, con_handle,
+                                                              ins->characteristic_report.value_handle,
                                                               sizeof(cmd_disable_lizard), cmd_disable_lizard);
-                    query_state = STATE_QUERY_DISABLE_LIZARD;
+                    ins->query_state = STATE_QUERY_DISABLE_LIZARD;
                     break;
                 default:
                     loge("Steam: Unknown event: %#x\n", event);
@@ -189,7 +221,7 @@ static void uni_steam_handle_gatt_client_event(uint8_t packet_type, uint16_t cha
                         break;
                     }
                     uni_hid_device_set_ready_complete(device);
-                    query_state = STATE_QUERY_END;
+                    ins->query_state = STATE_QUERY_END;
                     break;
                 default:
                     loge("Steam: Unknown event: %#x\n", event);
@@ -198,15 +230,16 @@ static void uni_steam_handle_gatt_client_event(uint8_t packet_type, uint16_t cha
         case STATE_QUERY_END:
             // pass-through
         default:
-            loge("Steam: Unknown query state: %#x\n", query_state);
+            loge("Steam: Unknown query state: %#x\n", ins->query_state);
             break;
     }
 }
 
 void uni_hid_parser_steam_setup(struct uni_hid_device_s* d) {
-    device = d;
-    connection_handle = d->conn.handle;
-    query_state = STATE_QUERY_SERVICE;
+    steam_instance_t* ins = get_steam_instance(d);
+    memset(ins, 0, sizeof(*ins));
+
+    ins->query_state = STATE_QUERY_SERVICE;
     gatt_client_discover_primary_services_by_uuid128(uni_steam_handle_gatt_client_event, d->conn.handle,
                                                      le_steam_service_uuid);
 
@@ -250,25 +283,44 @@ void uni_hid_parser_steam_parse_input_report(struct uni_hid_device_s* d, const u
 
     uint16_t report_flags = (report[2] & 0xf0) + (report[3] << 8);
 
+    // Each flagged section is packed sequentially starting at byte offset 4.
+    // A 20-byte BLE report has 16 payload bytes after the 4-byte header, whereas enabling
+    // all 5 flags simultaneously requests 3 + 2 + 4 + 4 + 4 = 17 bytes (21 > 20).
+    // Guard every section read with `idx + N <= len` and always advance `idx` by the
+    // section's wire size (including the unmapped 4-byte LEFT_PAD section) so subsequent
+    // sections read from the correct offset without reading past `report + len`.
     idx = 4;
     if (report_flags & STEAM_CONTROLLER_FLAG_BUTTONS) {
-        parse_buttons(d, &report[idx]);
+        if (idx + 3 <= len) {
+            parse_buttons(d, &report[idx]);
+        }
+        idx += 3;
     }
 
     if (report_flags & STEAM_CONTROLLER_FLAG_TRIGGERS) {
-        parse_triggers(d, &report[idx]);
+        if (idx + 2 <= len) {
+            parse_triggers(d, &report[idx]);
+        }
+        idx += 2;
     }
 
     if (report_flags & STEAM_CONTROLLER_FLAG_THUMBSTICK) {
-        parse_thumbstick(d, &report[idx]);
+        if (idx + 4 <= len) {
+            parse_thumbstick(d, &report[idx]);
+        }
+        idx += 4;
     }
 
     if (report_flags & STEAM_CONTROLLER_FLAG_LEFT_PAD) {
+        // Not mapped for the moment, but still occupies 4 bytes in the report stream.
         idx += 4;
     }
 
     if (report_flags & STEAM_CONTROLLER_FLAG_RIGHT_PAD) {
-        parse_right_pad(d, &report[idx]);
+        if (idx + 4 <= len) {
+            parse_right_pad(d, &report[idx]);
+        }
+        idx += 4;
     }
 }
 
@@ -318,8 +370,10 @@ static void parse_buttons(struct uni_hid_device_s* d, const uint8_t* data) {
 static void parse_thumbstick(struct uni_hid_device_s* d, const uint8_t* data) {
     uni_controller_t* ctl = &d->controller;
 
-    int16_t x = (data[0] | data[1] << 8);
-    int16_t y = (data[2] | data[3] << 8);
+    // Widen to 32-bit signed integers after 16-bit sign-extension so negating INT16_MIN
+    // (-32768 / 0x8000) produces +32768 (+512 after >> 6) instead of signed 16-bit overflow UB.
+    int32_t x = (int16_t)(data[0] | (data[1] << 8));
+    int32_t y = (int16_t)(data[2] | (data[3] << 8));
     y = -y;
 
     ctl->gamepad.axis_x = (x >> 6);
@@ -336,8 +390,10 @@ static void parse_triggers(struct uni_hid_device_s* d, const uint8_t* data) {
 static void parse_right_pad(struct uni_hid_device_s* d, const uint8_t* data) {
     uni_controller_t* ctl = &d->controller;
 
-    int16_t x = (data[0] | data[1] << 8);
-    int16_t y = (data[2] | data[3] << 8);
+    // Widen to 32-bit signed integers after 16-bit sign-extension so negating INT16_MIN
+    // (-32768 / 0x8000) produces +32768 (+512 after >> 6) instead of signed 16-bit overflow UB.
+    int32_t x = (int16_t)(data[0] | (data[1] << 8));
+    int32_t y = (int16_t)(data[2] | (data[3] << 8));
     y = -y;
 
     ctl->gamepad.axis_rx = (x >> 6);

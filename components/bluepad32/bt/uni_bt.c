@@ -131,17 +131,18 @@ static void stop_scan(void) {
         uni_bt_le_scan_stop();
 }
 
-static void start_scanning(bool enabled) {
-    if (bt_scanning_enabled != enabled) {
-        bt_scanning_enabled = enabled;
+static void update_scanning_state(bool new_state) {
+    if (bt_scanning_enabled == new_state)
+        return;
 
-        if (enabled)
-            start_scan();
-        else
-            stop_scan();
-    }
+    bt_scanning_enabled = new_state;
 
-    uni_get_platform()->on_oob_event(UNI_PLATFORM_OOB_BLUETOOTH_ENABLED, (void*)enabled);
+    if (bt_scanning_enabled)
+        start_scan();
+    else
+        stop_scan();
+
+    uni_get_platform()->on_oob_event(UNI_PLATFORM_OOB_BLUETOOTH_ENABLED, (void*)(uintptr_t)bt_scanning_enabled);
 }
 
 static void on_hci_disconnection_complete(uint16_t channel, const uint8_t* packet, uint16_t size) {
@@ -195,10 +196,10 @@ static void cmd_callback(void* context) {
             bluetooth_list_keys();
             break;
         case CMD_BT_START_SCANNING:
-            start_scanning(true);
+            update_scanning_state(true);
             break;
         case CMD_BT_STOP_SCANNING:
-            start_scanning(false);
+            update_scanning_state(false);
             break;
         case CMD_DUMP_DEVICES:
             uni_hid_device_dump_all();
@@ -223,7 +224,7 @@ static void cmd_callback(void* context) {
             break;
     }
 }
-static btstack_context_callback_registration_t* get_next_callback_registration() {
+static btstack_context_callback_registration_t* get_next_callback_registration(void) {
     cmd_callback_idx = (cmd_callback_idx + 1) % CMD_CALLBACK_MAX;
     return &cmd_callback_registration[cmd_callback_idx];
 }
@@ -261,14 +262,14 @@ void uni_bt_enable_new_connections_safe(bool enabled) {
         uni_bt_stop_scanning_safe();
 }
 
-void uni_bt_start_scanning_and_autoconnect_safe() {
+void uni_bt_start_scanning_and_autoconnect_safe(void) {
     btstack_context_callback_registration_t* cmd = get_next_callback_registration();
     cmd->callback = &cmd_callback;
     cmd->context = (void*)CMD_BT_START_SCANNING;
     btstack_run_loop_execute_on_main_thread(cmd);
 }
 
-void uni_bt_stop_scanning_safe() {
+void uni_bt_stop_scanning_safe(void) {
     btstack_context_callback_registration_t* cmd = get_next_callback_registration();
     cmd->callback = &cmd_callback;
     cmd->context = (void*)CMD_BT_STOP_SCANNING;
@@ -283,11 +284,11 @@ void uni_bt_enable_new_connections_unsafe(bool enabled) {
 }
 
 void uni_bt_start_scanning_and_autoconnect_unsafe(void) {
-    start_scanning(true);
+    update_scanning_state(true);
 }
 
 void uni_bt_stop_scanning_unsafe(void) {
-    start_scanning(false);
+    update_scanning_state(false);
 }
 
 bool uni_bt_enable_new_connections_is_enabled(void) {
@@ -306,7 +307,7 @@ bool uni_bt_incoming_connections_is_allowed(void) {
     return bt_allow_incoming_connections;
 }
 
-void uni_bt_dump_devices_safe() {
+void uni_bt_dump_devices_safe(void) {
     btstack_context_callback_registration_t* cmd = get_next_callback_registration();
     cmd->callback = &cmd_callback;
     cmd->context = (void*)CMD_DUMP_DEVICES;
@@ -427,6 +428,8 @@ void uni_bt_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* packe
                         default:
                             break;
                     }
+                    // Prevent fallthrough from HCI_EVENT_HID_META into HCI_EVENT_INQUIRY_RESULT.
+                    break;
                 }
                 case HCI_EVENT_INQUIRY_RESULT:
                     // logi("--> HCI_EVENT_INQUIRY_RESULT <--\n");
@@ -536,17 +539,19 @@ void uni_bt_packet_handler(uint8_t packet_type, uint16_t channel, uint8_t* packe
 
 // Properties
 void uni_bt_set_gap_security_level(int gap) {
-    uni_property_value_t val;
+    uni_property_value_t val = {0};
 
-    val.u32 = gap;
+    // UNI_PROPERTY_IDX_GAP_LEVEL is defined as UNI_PROPERTY_TYPE_U8 in uni_property.c,
+    // so access val.u8 directly to stay consistent across endiannesses and TLV/NVS backends.
+    val.u8 = (uint8_t)gap;
     uni_property_set(UNI_PROPERTY_IDX_GAP_LEVEL, val);
 }
 
-int uni_bt_get_gap_security_level() {
-    uni_property_value_t val;
+int uni_bt_get_gap_security_level(void) {
+    uni_property_value_t val = {0};
 
     val = uni_property_get(UNI_PROPERTY_IDX_GAP_LEVEL);
-    return val.u32;
+    return val.u8;
 }
 
 void uni_bt_set_gap_inquiry_length(int len) {
@@ -563,7 +568,7 @@ int uni_bt_get_gap_inquiry_length(void) {
     return val.u8;
 }
 
-void uni_bt_set_gap_max_peridic_length(int len) {
+void uni_bt_set_gap_max_periodic_length(int len) {
     uni_property_value_t val;
 
     val.u8 = len;
@@ -577,7 +582,7 @@ int uni_bt_get_gap_max_periodic_length(void) {
     return val.u8;
 }
 
-void uni_bt_set_gap_min_peridic_length(int len) {
+void uni_bt_set_gap_min_periodic_length(int len) {
     uni_property_value_t val;
 
     val.u8 = len;
